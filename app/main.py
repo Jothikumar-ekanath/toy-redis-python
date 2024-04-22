@@ -9,6 +9,7 @@ async def connection_handler(
         while True:
             request = await reader.readline()
             if request == b"":
+                print(f"Connection closed by {addr}")
                 break
             elif b"ping" in request:
                 writer.write(b"+PONG\r\n")
