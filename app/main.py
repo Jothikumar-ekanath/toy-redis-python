@@ -1,5 +1,6 @@
 import asyncio
 from app.parser import RESPParser
+import argparse
 
 # to store Key-Value pairs
 cache = {}
@@ -86,17 +87,20 @@ async def connection_handler(
 
 
 
-async def main():
-    server = await asyncio.start_server(connection_handler, "localhost", 6379)
+async def main(port: int):
+    server = await asyncio.start_server(connection_handler, "localhost", port)
     print(f"Server running on {server.sockets[0].getsockname()}")
     async with server:
         await server.serve_forever()
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", help="custom port number")
+    args = parser.parse_args()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        asyncio.run(main())
+        asyncio.run(main(args.port  or 6379))
     except KeyboardInterrupt:
         pass
