@@ -6,15 +6,46 @@ import argparse
 cache = {}
 
 # coroutine that will start another coroutine after a delay in seconds
+
+
 async def delay(coro, seconds):
     # suspend for a time limit in seconds
     await asyncio.sleep(seconds)
     # execute the other coroutine
     await coro
 
+
 async def pop_cache(key: str) -> None:
     print(f"Expiring key {key}")
     cache.pop(key, None)
+
+
+class DataType:
+    ARRAY = b'*'
+    BULK_STRING = b'$'
+    SIMPLE_STRING = b'+'
+    SIMPLE_ERROR = b'-'
+
+# response enum
+# 1. Simple String: +OK\r\n
+# 2. Error: -ERR\r\n
+# 3. Integer: :1000\r\n
+# 4. Bulk String: $6\r\nfoobar\r\n
+# 5. Array: *2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n
+# 6. Null Bulk String: $-1\r\n
+# 7. Null Array: *-1\r\n
+
+
+async def generate_response(value: str, type: DataType) -> bytes:
+    if type == DataType.BULK_STRING:
+        if value is None:
+            return b"$-1\r\n"
+        resp = (
+            b"$" + str(len(value)).encode("utf-8") +
+            b"\r\n" + value.encode() + b"\r\n"
+        )
+        return resp
+
 
 async def handle_request(parsed_req: bytes | list[bytes] | None) -> bytes:
     # Placeholder implementation, replace with actual request handling logic
@@ -33,13 +64,7 @@ async def handle_request(parsed_req: bytes | list[bytes] | None) -> bytes:
                 # Example: handling GET command
                 key = parsed_req[1]
                 value = cache.get(key)
-                if value is None:
-                    return b"$-1\r\n"
-                resp = (
-                    b"$" + str(len(value)).encode("utf-8") +
-                    b"\r\n" + value.encode() + b"\r\n"
-                )
-                return resp
+                return await generate_response(value, DataType.BULK_STRING)
             case "SET":
                 # Example: handling SET command
                 key = parsed_req[1]
@@ -48,9 +73,19 @@ async def handle_request(parsed_req: bytes | list[bytes] | None) -> bytes:
                 if len(parsed_req) > 3 and parsed_req[3].upper() == "PX":
                     # SET key value PX milliseconds
                     delay_sec = int(parsed_req[4]) / 1000
-                    #print(f"Setting key {key} to expire in {delay_sec} seconds")
+                    # print(f"Setting key {key} to expire in {delay_sec} seconds")
                     asyncio.create_task(delay(pop_cache(key), delay_sec))
                 return b"+OK\r\n"
+            case "INFO":
+                replication = {
+                    'role': 'master',
+                    'connected_slaves': 0,
+                    'master_replid': '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb',
+                    'master_repl_offset': 0
+                }
+                data = '\n'.join(
+                    [f'{key}:{value}' for key, value in replication.items()])
+                return await generate_response(data, DataType.BULK_STRING)  
             case _:
                 # Unsupported command
                 return b"-ERR\r\n"
@@ -86,7 +121,6 @@ async def connection_handler(
         # await writer.wait_closed()
 
 
-
 async def main(port: int):
     server = await asyncio.start_server(connection_handler, "localhost", port)
     print(f"Server running on {server.sockets[0].getsockname()}")
@@ -101,6 +135,6 @@ if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        asyncio.run(main(args.port  or 6379))
+        asyncio.run(main(args.port or 6379))
     except KeyboardInterrupt:
         pass
