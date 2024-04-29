@@ -113,11 +113,12 @@ async def process_resp_request(reader):
         command = await reader.read(1024)
         print(f"received command: {command}")
         if not command:
-            # print(f"Connection closed by {addr} for {command}")
+            print(f"Connection closed by {command}")
             break
         else:
             parser.feed_data(command)
             parsed_req = parser.parse()
+    print(f"parsed_req: {parsed_req}")
     return parsed_req
 
 
@@ -125,13 +126,16 @@ async def send_handshake_replica(address):
     host, port = address
     reader, writer = await asyncio.open_connection(host, port)
     try:
-        writer.write(b'*1\r\n$4\r\nping\r\n')  # sends PING command
+        # sends PING command
+        writer.write(b'*1\r\n$4\r\nping\r\n')
         await writer.drain()
         req = await process_resp_request(reader)
         print(f"Received handshake PING response: {req}")
-        writer.write(b'*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n' +
-                     # sends REPLCONF listening-port <PORT> command
-                     str(args.port).encode()+'\r\n')
+        # sends REPLCONF listening-port <PORT> command
+        replconf = b'*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n' + \
+            str(args.port).encode()+'\r\n'
+        print(f"Sending REPLCONF listening-port <PORT> command: {replconf}")
+        writer.write(replconf)
         await writer.drain()
         req = await process_resp_request(reader)
         print(

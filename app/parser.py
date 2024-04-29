@@ -7,6 +7,7 @@ class RESPParser:
         self.buffer += data
         
     def parse(self):
+        print(f"buffer: {self.buffer}")
         while True:
             if self.current_pos >= len(self.buffer):
                 break
@@ -16,11 +17,13 @@ class RESPParser:
                 string_length = self._parse_integer()
                 if self.current_pos + string_length + 2 > len(self.buffer):
                     # Not enough data to parse
+                    print(f" Bulk string_length: {string_length}")
                     break
                 bulk_string = self.buffer[
                     self.current_pos : self.current_pos + string_length
                 ]
                 self.current_pos += string_length + 2  # Skip \r\n
+                print(f" Bulk string: {bulk_string}")
                 yield bulk_string
             elif self.buffer[self.current_pos] == 42:  # *
                 # Array
@@ -28,10 +31,12 @@ class RESPParser:
                 array_length = self._parse_integer()
                 if array_length == -1:
                     # Null array
+                    print(f" Null array_length: {array_length}")
                     yield None
                     continue
                 if self.current_pos + array_length + 2 > len(self.buffer):
                     # Not enough data to parse
+                    print(f" Array array_length: {array_length}")
                     break
                 array_data = []
                 for _ in range(array_length):
@@ -40,15 +45,18 @@ class RESPParser:
                         array_data.append(next_data.decode("utf-8"))
                     else:
                         array_data.append(next_data)
+                print(f" Array array_data: {array_data}")
                 yield array_data
             else:
                 # Simple string, integer, or error
                 end_pos = self.buffer.find(b"\r\n", self.current_pos)
                 if end_pos == -1:
                     # Not enough data to parse
+                    print(f" Simple string, integer, or error")
                     break
                 response = self.buffer[self.current_pos : end_pos]
                 self.current_pos = end_pos + 2  # Skip \r\n
+                print(f" Simple string, integer, or error response: {response}")
                 yield response
 
     def _parse_integer(self):
