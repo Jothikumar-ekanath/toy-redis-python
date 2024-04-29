@@ -65,7 +65,7 @@ async def handle_request(parsed_req: bytes | list[bytes] | None) -> bytes:
             case "PING":
                 return ResponseType.PONG
             case "ECHO":
-                return await generate_response(parsed_req[1].decode("utf-8"), ResponseType.SIMPLE_STRING)
+                return await generate_response(parsed_req[1], ResponseType.SIMPLE_STRING)
             case "GET":
                 # Example: handling GET command
                 key = parsed_req[1]
