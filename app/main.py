@@ -4,27 +4,32 @@ import argparse
 
 # to store Key-Value pairs
 cache = {}
-
+args = None
+replication = {
+    'role': 'master',
+    'connected_slaves': 0,
+    'master_replid': '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb',
+    'master_repl_offset': 0
+}
 # coroutine that will start another coroutine after a delay in seconds
-
-
 async def delay(coro, seconds):
     # suspend for a time limit in seconds
     await asyncio.sleep(seconds)
     # execute the other coroutine
     await coro
 
-
 async def pop_cache(key: str) -> None:
     print(f"Expiring key {key}")
     cache.pop(key, None)
 
 
-class DataType:
+class ResponseType:
     ARRAY = b'*'
     BULK_STRING = b'$'
     SIMPLE_STRING = b'+'
-    SIMPLE_ERROR = b'-'
+    SIMPLE_ERROR = b"-ERR\r\n"
+    OK = b'+OK\r\n'
+    PONG = b'+PONG\r\n'
 
 # response enum
 # 1. Simple String: +OK\r\n
@@ -36,8 +41,8 @@ class DataType:
 # 7. Null Array: *-1\r\n
 
 
-async def generate_response(value: str, type: DataType) -> bytes:
-    if type == DataType.BULK_STRING:
+async def generate_response(value: str, type: ResponseType) -> bytes:
+    if type == ResponseType.BULK_STRING:
         if value is None:
             return b"$-1\r\n"
         resp = (
@@ -45,7 +50,8 @@ async def generate_response(value: str, type: DataType) -> bytes:
             b"\r\n" + value.encode() + b"\r\n"
         )
         return resp
-
+    if type == ResponseType.SIMPLE_STRING:
+        return b"+" + value.encode("utf-8") + b"\r\n"
 
 async def handle_request(parsed_req: bytes | list[bytes] | None) -> bytes:
     # Placeholder implementation, replace with actual request handling logic
@@ -57,14 +63,14 @@ async def handle_request(parsed_req: bytes | list[bytes] | None) -> bytes:
         cmd = parsed_req[0].upper()
         match cmd:
             case "PING":
-                return b"+PONG\r\n"
+                return ResponseType.PONG
             case "ECHO":
-                return b"+" + parsed_req[1].encode("utf-8") + b"\r\n"
+                return await generate_response(parsed_req[1].decode("utf-8"), ResponseType.SIMPLE_STRING)
             case "GET":
                 # Example: handling GET command
                 key = parsed_req[1]
                 value = cache.get(key)
-                return await generate_response(value, DataType.BULK_STRING)
+                return await generate_response(value, ResponseType.BULK_STRING)
             case "SET":
                 # Example: handling SET command
                 key = parsed_req[1]
@@ -75,25 +81,17 @@ async def handle_request(parsed_req: bytes | list[bytes] | None) -> bytes:
                     delay_sec = int(parsed_req[4]) / 1000
                     # print(f"Setting key {key} to expire in {delay_sec} seconds")
                     asyncio.create_task(delay(pop_cache(key), delay_sec))
-                return b"+OK\r\n"
+                return ResponseType.OK
             case "INFO":
-                replication = {
-                    'role': 'master',
-                    'connected_slaves': 0,
-                    'master_replid': '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb',
-                    'master_repl_offset': 0
-                }
                 data = '\n'.join(
                     [f'{key}:{value}' for key, value in replication.items()])
-                return await generate_response(data, DataType.BULK_STRING)  
+                return await generate_response(data, ResponseType.BULK_STRING)
             case _:
                 # Unsupported command
-                return b"-ERR\r\n"
+                return ResponseType.SIMPLE_ERROR
     else:
         # Null array or unsupported request
-        return b"-ERR\r\n"
-
-# Simple connection handler using asyncio
+        return ResponseType.SIMPLE_ERROR
 
 
 async def connection_handler(
@@ -121,20 +119,22 @@ async def connection_handler(
         # await writer.wait_closed()
 
 
-async def main(port: int):
-    server = await asyncio.start_server(connection_handler, "localhost", port)
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-p', '--port', type=int)
+    parser.add_argument('--replicaof', nargs=2, type=str)
+    args = parser.parse_args()
+    if args.replicaof:
+        replication['role'] = 'slave'
+
+    server = await asyncio.start_server(connection_handler, "localhost", args.port or 6379)
     print(f"Server running on {server.sockets[0].getsockname()}")
     async with server:
         await server.serve_forever()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", help="custom port number")
-    args = parser.parse_args()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        asyncio.run(main(args.port or 6379))
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
