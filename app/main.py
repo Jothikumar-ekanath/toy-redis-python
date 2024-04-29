@@ -134,15 +134,15 @@ async def send_handshake_replica(address):
         response = await RESPParser.parse_resp_request(reader)
         print(f"Received handshake REPLCONF capa psync2 response: {response}")
         # sends PSYNC ? -1 command
-        writer.write(
-        await encode(DataType.ARRAY, [
-            await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
-            await encode(DataType.BULK_STRING, '?'.encode()),
-            await encode(DataType.BULK_STRING, '-1'.encode())
-        ]))
-        await writer.drain()
-        response = await RESPParser.parse_resp_request(reader)
-        print(f"Received handshake PSYNC response: {response}")
+        # writer.write(
+        # await encode(DataType.ARRAY, [
+        #     await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
+        #     await encode(DataType.BULK_STRING, '?'.encode()),
+        #     await encode(DataType.BULK_STRING, '-1'.encode())
+        # ]))
+        # await writer.drain()
+        # response = await RESPParser.parse_resp_request(reader)
+        # print(f"Received handshake PSYNC response: {response}")
 
     finally:
         writer.close()
