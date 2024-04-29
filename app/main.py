@@ -5,6 +5,7 @@ import argparse
 # to store Key-Value pairs
 cache = {}
 args = None
+# replication data
 replication = {
     'role': 'master',
     'connected_slaves': 0,
