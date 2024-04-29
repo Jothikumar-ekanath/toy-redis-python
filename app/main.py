@@ -1,5 +1,5 @@
 import asyncio
-from app.parser import RESPParser
+from app.parser import RESPParser, DataType, Constant, Command
 import argparse
 
 # to store Key-Value pairs
@@ -27,76 +27,70 @@ async def pop_cache(key: str) -> None:
     cache.pop(key, None)
 
 
-class ResponseType:
-    ARRAY = b'*'
-    BULK_STRING = b'$'
-    SIMPLE_STRING = b'+'
-    SIMPLE_ERROR = b"-ERR\r\n"
-    OK = b'+OK\r\n'
-    PONG = b'+PONG\r\n'
+async def encode(datatype: DataType, data: bytes | list[bytes]):
+    """
+    Encode data as per RESP specifications
+    """
+
+    if datatype in (DataType.SIMPLE_STRING, DataType.SIMPLE_ERROR):
+        return Constant.TERMINATOR.join([datatype + data, Constant.EMPTY_BYTE])
+
+    if datatype == DataType.BULK_STRING:
+        length = len(data)
+        return Constant.TERMINATOR.join([datatype + str(length).encode(), data, Constant.EMPTY_BYTE])
+
+    if datatype == DataType.ARRAY:
+        num_elements = len(data)
+        return Constant.TERMINATOR.join([
+            datatype +
+            str(num_elements).encode(), Constant.EMPTY_BYTE.join(data)
+        ])
 
 
-async def generate_response(value: str, type: ResponseType) -> bytes:
-    if type == ResponseType.BULK_STRING:
-        if value is None:
-            return b"$-1\r\n"
-        resp = (
-            b"$" + str(len(value)).encode("utf-8") +
-            b"\r\n" + value.encode() + b"\r\n"
-        )
-        return resp
-    if type == ResponseType.SIMPLE_STRING:
-        return b"+" + value.encode("utf-8") + b"\r\n"
-
-
-async def handle_request(parsed_req: bytes | list[bytes] | None) -> bytes:
-    # Placeholder implementation, replace with actual request handling logic
-    if isinstance(parsed_req, bytes):
-        # Simple string or integer
-        return b"+" + parsed_req + b"\r\n"
-    elif isinstance(parsed_req, list):
-        # Array
-        cmd = parsed_req[0].upper()
+async def execute_resp_commands(commands: list[str] | None) -> bytes:
+    if not commands:
+         return await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
+    else: # Treat all other RESP commands
+        cmd = commands[0].lower()
         match cmd:
-            case "PING":
-                return ResponseType.PONG
-            case "ECHO":
-                return await generate_response(parsed_req[1], ResponseType.SIMPLE_STRING)
-            case "GET":
+            case Command.PING:
+                return await encode(DataType.SIMPLE_STRING, Constant.PONG)
+            case Command.ECHO:
+                 return await encode(DataType.SIMPLE_STRING, commands[1].encode())
+            case Command.GET:
                 # Example: handling GET command
-                key = parsed_req[1]
+                key = commands[1]
                 value = cache.get(key)
-                return await generate_response(value, ResponseType.BULK_STRING)
-            case "SET":
+                if value is None:
+                    return Constant.NULL_BULK_STRING
+                return await encode(DataType.BULK_STRING, value.encode())
+            case Command.SET:
                 # Example: handling SET command
-                key = parsed_req[1]
-                value = parsed_req[2]
+                key = commands[1]
+                value = commands[2]
                 cache[key] = value
-                if len(parsed_req) > 3 and parsed_req[3].upper() == "PX":
+                if len(commands) > 3 and commands[3].upper() == "PX":
                     # SET key value PX milliseconds
-                    delay_sec = int(parsed_req[4]) / 1000
+                    delay_sec = int(commands[4]) / 1000
                     # print(f"Setting key {key} to expire in {delay_sec} seconds")
                     asyncio.create_task(delay(pop_cache(key), delay_sec))
-                return ResponseType.OK
+                return await encode(DataType.SIMPLE_STRING, Constant.OK)
             case "INFO":
                 data = '\n'.join(
-                    [f'{key}:{value}' for key, value in replication.items()])
-                return await generate_response(data, ResponseType.BULK_STRING)
-            case _:
-                # Unsupported command
-                return ResponseType.SIMPLE_ERROR
-    else:
-        # Null array or unsupported request
-        return ResponseType.SIMPLE_ERROR
+                    [f'{key}:{value}' for key, value in replication.items()]).encode()
+                return await encode(DataType.BULK_STRING, data)            
+            case "REPLCONF":
+                pass
+    return await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
 
 
 async def connection_handler(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
         addr = writer.get_extra_info("peername")
-        parsed_req = await process_resp_request(reader, writer)
-        print(f"RESP parsed_req: {parsed_req}")
-        response = await handle_request(parsed_req)
+        commands = await RESPParser.parse_resp_request(reader)
+        print(f"RESP parsed_req: {commands}")
+        response = await execute_resp_commands(commands)
         writer.write(response)
         await writer.drain()
     except Exception as e:
@@ -106,50 +100,49 @@ async def connection_handler(
         # await writer.wait_closed()
 
 
-async def process_resp_request(reader):
-    parser = RESPParser()
-    parsed_req = None
-    while reader.at_eof() is False:
-        command = await reader.read(1024)
-        print(f"received command: {command}")
-        if not command:
-            print(f"Connection closed by {command}")
-            break
-        else:
-            parser.feed_data(command)
-            parsed_req = parser.parse()
-    print(f"parsed_req: {parsed_req}")
-    return parsed_req
 
 
 async def send_handshake_replica(address):
     host, port = address
+    global args
     reader, writer = await asyncio.open_connection(host, port)
     try:
         # sends PING command
         writer.write(b'*1\r\n$4\r\nping\r\n')
         await writer.drain()
-        req = await process_resp_request(reader)
-        print(f"Received handshake PING response: {req}")
+        response = await RESPParser.parse_resp_request(reader)
+        print(f"Received handshake PING response: {response}")
         # sends REPLCONF listening-port <PORT> command
-        replconf = b'*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n' + \
-            str(args.port).encode()+'\r\n'
-        print(f"Sending REPLCONF listening-port <PORT> command: {replconf}")
-        writer.write(replconf)
+        writer.write(
+        await encode(DataType.ARRAY, [
+            await encode(DataType.BULK_STRING, Command.REPLCONF.encode()),
+            await encode(DataType.BULK_STRING, 'listening-port'.encode()),
+            await encode(DataType.BULK_STRING, str(args.port).encode())
+        ]))
         await writer.drain()
-        req = await process_resp_request(reader)
+        response = await RESPParser.parse_resp_request(reader)
         print(
-            f"Received handshake REPLCONF listening-port <PORT> response: {req}")
-        # sends REPLCONF capa eof capa psync2
-        writer.write(b'*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n')
+            f"Received handshake REPLCONF listening-port <PORT> response: {response}")
+        
+        writer.write(
+        await encode(DataType.ARRAY, [
+            await encode(DataType.BULK_STRING, Command.REPLCONF.encode()),
+            await encode(DataType.BULK_STRING, 'capa'.encode()),
+            await encode(DataType.BULK_STRING, 'psync2'.encode())
+        ]))
         await writer.drain()
-        req = await process_resp_request(reader)
-        print(f"Received handshake REPLCONF capa psync2 response: {req}")
+        response = await RESPParser.parse_resp_request(reader)
+        print(f"Received handshake REPLCONF capa psync2 response: {response}")
         # sends PSYNC ? -1 command
-        writer.write(b'*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n')
+        writer.write(
+        await encode(DataType.ARRAY, [
+            await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
+            await encode(DataType.BULK_STRING, '?'.encode()),
+            await encode(DataType.BULK_STRING, '-1'.encode())
+        ]))
         await writer.drain()
-        req = await process_resp_request(reader)
-        print(f"Received handshake PSYNC response: {req}")
+        response = await RESPParser.parse_resp_request(reader)
+        print(f"Received handshake PSYNC response: {response}")
 
     finally:
         writer.close()
@@ -159,6 +152,7 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--port', type=int)
     parser.add_argument('--replicaof', nargs=2, type=str)
+    global args
     args = parser.parse_args()
     if args.replicaof:
         replication['role'] = 'slave'

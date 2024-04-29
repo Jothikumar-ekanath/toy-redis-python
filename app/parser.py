@@ -1,69 +1,77 @@
+import asyncio
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class DataType:
+    ARRAY = b'*'
+    BULK_STRING = b'$'
+    SIMPLE_STRING = b'+'
+    SIMPLE_ERROR = b'-'
+
+
+@dataclass
+class Constant:
+    NULL_BULK_STRING = b'$-1\r\n'
+    TERMINATOR = b'\r\n'
+    EMPTY_BYTE = b''
+    SPACE_BYTE = b' '
+    PONG = b'PONG'
+    OK = b'OK'
+    INVALID_COMMAND = b'Invalid Command'
+    FULLRESYNC = b'FULLRESYNC'
+
+
+@dataclass
+class Command:
+    PING = 'ping'
+    ECHO = 'echo'
+    SET = 'set'
+    GET = 'get'
+    INFO = 'info'
+    REPLCONF = 'replconf'
+    PSYNC = 'psync'
+
+
 class RESPParser:
-    def __init__(self):
-        self.buffer = b""
-        self.current_pos = 0
 
-    def feed_data(self, data):
-        self.buffer += data
+    async def parse_resp_request(reader: asyncio.StreamReader):
+        try:
+            _ = await reader.read(1)
+            if _ != DataType.ARRAY:
+                print(f'Expected {DataType.ARRAY}, got {_}')
+                return []
+
+            num_commands = int(await reader.readuntil(Constant.TERMINATOR))
+            # note: even though read.readuntil() returns bytes along with the terminator,
+            # int() is able to handle bytes and surrounding whitespaces.
+            # note: '\r' and '\n' are counted as whitespaces.
+
+            commands = []
+
+            while len(commands) < num_commands:
+
+                datatype = await reader.read(1)
+
+                if datatype == DataType.BULK_STRING:
+                    length = int(await reader.readuntil(Constant.TERMINATOR))
+                    data = await reader.read(length)
+
+                    _ = await reader.read(2)
+                    # terminator not found after `length` bytes
+                    if _ != Constant.TERMINATOR:
+                        print(f'Expected {Constant.TERMINATOR}, got {_}')
+                        return []
+
+                    commands.append(data.decode())
+
+                else:
+                    print(f'Expected {DataType.BULK_STRING}, got {datatype}')
+                    return []
+
+            return commands
+
+        except Exception as e:
+            print(f'An error occurred: {e}')
+            return []
         
-    def parse(self):
-        print(f"buffer: {self.buffer}")
-        while True:
-            if self.current_pos >= len(self.buffer):
-                break
-            if self.buffer[self.current_pos] == 36:  # $
-                # Bulk string
-                self.current_pos += 1
-                string_length = self._parse_integer()
-                if self.current_pos + string_length + 2 > len(self.buffer):
-                    # Not enough data to parse
-                    print(f" Bulk string_length: {string_length}")
-                    break
-                bulk_string = self.buffer[
-                    self.current_pos : self.current_pos + string_length
-                ]
-                self.current_pos += string_length + 2  # Skip \r\n
-                print(f" Bulk string: {bulk_string}")
-                yield bulk_string
-            elif self.buffer[self.current_pos] == 42:  # *
-                # Array
-                self.current_pos += 1
-                array_length = self._parse_integer()
-                if array_length == -1:
-                    # Null array
-                    print(f" Null array_length: {array_length}")
-                    yield None
-                    continue
-                if self.current_pos + array_length + 2 > len(self.buffer):
-                    # Not enough data to parse
-                    print(f" Array array_length: {array_length}")
-                    break
-                array_data = []
-                for _ in range(array_length):
-                    next_data = next(self.parse())
-                    if isinstance(next_data, bytes):
-                        array_data.append(next_data.decode("utf-8"))
-                    else:
-                        array_data.append(next_data)
-                print(f" Array array_data: {array_data}")
-                yield array_data
-            else:
-                # Simple string, integer, or error
-                end_pos = self.buffer.find(b"\r\n", self.current_pos)
-                if end_pos == -1:
-                    # Not enough data to parse
-                    print(f" Simple string, integer, or error")
-                    break
-                response = self.buffer[self.current_pos : end_pos]
-                self.current_pos = end_pos + 2  # Skip \r\n
-                print(f" Simple string, integer, or error response: {response}")
-                yield response
-
-    def _parse_integer(self):
-        end_pos = self.buffer.find(b"\r\n", self.current_pos)
-        if end_pos == -1:
-            # Not enough data to parse
-            return None
-        integer_str = self.buffer[self.current_pos : end_pos]
-        self.current_pos = end_pos + 2  # Skip \r\n
-        return int(integer_str)
