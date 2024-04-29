@@ -35,15 +35,6 @@ class ResponseType:
     OK = b'+OK\r\n'
     PONG = b'+PONG\r\n'
 
-# response enum
-# 1. Simple String: +OK\r\n
-# 2. Error: -ERR\r\n
-# 3. Integer: :1000\r\n
-# 4. Bulk String: $6\r\nfoobar\r\n
-# 5. Array: *2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n
-# 6. Null Bulk String: $-1\r\n
-# 7. Null Array: *-1\r\n
-
 
 async def generate_response(value: str, type: ResponseType) -> bytes:
     if type == ResponseType.BULK_STRING:
@@ -103,20 +94,11 @@ async def connection_handler(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
         addr = writer.get_extra_info("peername")
-        parser = RESPParser()
-        while reader.at_eof() is False:
-            command = await reader.read(1024)
-            print(f"received command: {command}")
-            if not command:
-                # print(f"Connection closed by {addr} for {command}")
-                break
-            else:
-                parser.feed_data(command)
-                for parsed_req in parser.parse():
-                    print(f"RESP parsed_req: {parsed_req}")
-                    response = await handle_request(parsed_req)
-                    writer.write(response)
-                    await writer.drain()
+        parsed_req = await process_resp_request(reader, writer)
+        print(f"RESP parsed_req: {parsed_req}")
+        response = await handle_request(parsed_req)
+        writer.write(response)
+        await writer.drain()
     except Exception as e:
         print(f"An error occurred for {addr}: {e}")
     finally:
@@ -124,12 +106,47 @@ async def connection_handler(
         # await writer.wait_closed()
 
 
-async def send_handshake(address):
+async def process_resp_request(reader):
+    parser = RESPParser()
+    parsed_req = None
+    while reader.at_eof() is False:
+        command = await reader.read(1024)
+        print(f"received command: {command}")
+        if not command:
+            # print(f"Connection closed by {addr} for {command}")
+            break
+        else:
+            parser.feed_data(command)
+            parsed_req = parser.parse()
+    return parsed_req
+
+
+async def send_handshake_replica(address):
     host, port = address
     reader, writer = await asyncio.open_connection(host, port)
     try:
-        writer.write(b'*1\r\n$4\r\nping\r\n')  # send PING command
+        writer.write(b'*1\r\n$4\r\nping\r\n')  # sends PING command
         await writer.drain()
+        req = await process_resp_request(reader)
+        print(f"Received handshake PING response: {req}")
+        writer.write(b'*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n' +
+                     # sends REPLCONF listening-port <PORT> command
+                     str(args.port).encode()+'\r\n')
+        await writer.drain()
+        req = await process_resp_request(reader)
+        print(
+            f"Received handshake REPLCONF listening-port <PORT> response: {req}")
+        # sends REPLCONF capa eof capa psync2
+        writer.write(b'*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n')
+        await writer.drain()
+        req = await process_resp_request(reader)
+        print(f"Received handshake REPLCONF capa psync2 response: {req}")
+        # sends PSYNC ? -1 command
+        writer.write(b'*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n')
+        await writer.drain()
+        req = await process_resp_request(reader)
+        print(f"Received handshake PSYNC response: {req}")
+
     finally:
         writer.close()
 
@@ -141,7 +158,7 @@ async def main():
     args = parser.parse_args()
     if args.replicaof:
         replication['role'] = 'slave'
-        await send_handshake(args.replicaof)
+        await send_handshake_replica(args.replicaof)
 
     server = await asyncio.start_server(connection_handler, "localhost", args.port or 6379)
     print(f"Server running on {server.sockets[0].getsockname()}")
