@@ -13,11 +13,14 @@ replication = {
     'master_repl_offset': 0
 }
 # coroutine that will start another coroutine after a delay in seconds
+
+
 async def delay(coro, seconds):
     # suspend for a time limit in seconds
     await asyncio.sleep(seconds)
     # execute the other coroutine
     await coro
+
 
 async def pop_cache(key: str) -> None:
     print(f"Expiring key {key}")
@@ -53,6 +56,7 @@ async def generate_response(value: str, type: ResponseType) -> bytes:
         return resp
     if type == ResponseType.SIMPLE_STRING:
         return b"+" + value.encode("utf-8") + b"\r\n"
+
 
 async def handle_request(parsed_req: bytes | list[bytes] | None) -> bytes:
     # Placeholder implementation, replace with actual request handling logic
@@ -120,6 +124,16 @@ async def connection_handler(
         # await writer.wait_closed()
 
 
+async def send_handshake(address):
+    host, port = address
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        writer.write(b'*1\r\n$4\r\nping\r\n')  # send PING command
+        await writer.drain()
+    finally:
+        writer.close()
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--port', type=int)
@@ -127,6 +141,7 @@ async def main():
     args = parser.parse_args()
     if args.replicaof:
         replication['role'] = 'slave'
+        await send_handshake(args.replicaof)
 
     server = await asyncio.start_server(connection_handler, "localhost", args.port or 6379)
     print(f"Server running on {server.sockets[0].getsockname()}")
