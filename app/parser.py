@@ -37,9 +37,11 @@ class RESPParser:
 
     async def parse_resp_request(reader: asyncio.StreamReader):
         try:
-            _ = await reader.read(1)
-            if _ != DataType.ARRAY:
-                print(f'Expected {DataType.ARRAY}, got {_}')
+            first_byte = await reader.read(1)
+            if first_byte == Constant.EMPTY_BYTE:
+                return None
+            if first_byte != DataType.ARRAY:
+                print(f'Expected {DataType.ARRAY}, got {first_byte}')
                 return []
 
             num_commands = int(await reader.readuntil(Constant.TERMINATOR))
@@ -57,10 +59,10 @@ class RESPParser:
                     length = int(await reader.readuntil(Constant.TERMINATOR))
                     data = await reader.read(length)
 
-                    _ = await reader.read(2)
+                    first_byte = await reader.read(2)
                     # terminator not found after `length` bytes
-                    if _ != Constant.TERMINATOR:
-                        print(f'Expected {Constant.TERMINATOR}, got {_}')
+                    if first_byte != Constant.TERMINATOR:
+                        print(f'Expected {Constant.TERMINATOR}, got {first_byte}')
                         return []
 
                     commands.append(data.decode())

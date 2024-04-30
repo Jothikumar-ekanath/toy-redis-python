@@ -1,10 +1,11 @@
 import asyncio
 from app.parser import RESPParser, DataType, Constant, Command
 import argparse
-
+import traceback
 # to store Key-Value pairs
 cache = {}
-args = None
+replica_connections = []
+write_commands = set([Command.SET])
 rdb_state = bytes.fromhex(
     '524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2')
 # replication data
@@ -97,87 +98,107 @@ async def execute_resp_commands(commands: list[str] | None) -> bytes:
 async def connection_handler(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
-        while not reader.at_eof():
-            addr = writer.get_extra_info("peername")
+        addr = writer.get_extra_info('peername')
+        while True:
+            print(f"{replication['role']} - Waiting for the next command...{addr}")
             commands = await RESPParser.parse_resp_request(reader)
-            print(f"RESP parsed_req: {commands}")
-            response = await execute_resp_commands(commands)
-            writer.write(response)
-            await writer.drain()
+            if commands is None:
+                print(f"{replication['role']} - Received empty byte from client, assuming Connection closed {addr}")
+                break
+            print(f"{replication['role']} - RESP parsed_req: {commands} for client {addr}")
+            # Collecting the replica connections
+            if commands and commands[0].lower() == Command.REPLCONF and commands[1] == 'listening-port':
+                replica_connections.append((reader, writer))
+                print(f"{replication['role']} - Replica connections added for {addr}")
+            if commands:
+                response = await execute_resp_commands(commands)
+                writer.write(response)
+                await writer.drain()
             # Sending the empty RDB file
-            if commands[0].lower() == Command.PSYNC:
+            if commands and commands[0].lower() == Command.PSYNC:
                 writer.write(Constant.EMPTY_BYTE.join([DataType.BULK_STRING, str(
                     len(rdb_state)).encode(), Constant.TERMINATOR, rdb_state]))
                 await writer.drain()
+            # Sending the commands to the replicas
+            if commands and commands[0].lower() in write_commands:
+                commands_bytes = await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, command.encode())) for command in commands])
+                for _, writer in replica_connections:
+                    writer.write(commands_bytes)
+                    await writer.drain()
+                    print(f'sent {commands_bytes} to replica {
+                          writer.get_extra_info('peername')}')
+        print(f"{replication['role']} - Finished waiting for requests from client - {addr}")
     except Exception as e:
-        print(f"An error occurred for {addr}: {e}")
+        print(f"{replication['role']} - Error occurred for client {addr}: {e}")
+        print(traceback.format_exc())
     finally:
-        print(f"Closing the connection with {addr}")
+        print(f"{replication['role']} - Closing the connection for client {addr}")
         # writer.close()
         await writer.wait_closed()
 
 
-async def send_handshake_replica(address):
+async def handle_connection_with_master(address,replica_port):
+    print(f"{replication['role']} - Starting the master handler coroutine on port {replica_port} with address {address}")
     host, port = address
-    global args
     reader, writer = await asyncio.open_connection(host, port)
-
-    # sends PING command
-    writer.write(b'*1\r\n$4\r\nping\r\n')
-    await writer.drain()
-    response = await reader.readuntil(Constant.TERMINATOR)
-    print(f"Received handshake PING response: {response}")
-    # sends REPLCONF listening-port <PORT> command
-    writer.write(
-        await encode(DataType.ARRAY, [
+    # Master handshake
+    handshake_bytes = [b'*1\r\n$4\r\nping\r\n', await encode(DataType.ARRAY, [
             await encode(DataType.BULK_STRING, Command.REPLCONF.encode()),
             await encode(DataType.BULK_STRING, 'listening-port'.encode()),
-            await encode(DataType.BULK_STRING, str(args.port).encode())
-        ]))
-    await writer.drain()
-    response = await reader.readuntil(Constant.TERMINATOR)
-    print(
-        f"Received handshake REPLCONF listening-port <PORT> response: {response}")
-
-    writer.write(
-        await encode(DataType.ARRAY, [
+            await encode(DataType.BULK_STRING, str(replica_port).encode())
+        ]),await encode(DataType.ARRAY, [
             await encode(DataType.BULK_STRING, Command.REPLCONF.encode()),
             await encode(DataType.BULK_STRING, 'capa'.encode()),
             await encode(DataType.BULK_STRING, 'psync2'.encode())
-        ]))
-    await writer.drain()
-    response = await reader.readuntil(Constant.TERMINATOR)
-    print(f"Received handshake REPLCONF capa psync2 response: {response}")
-    # sends PSYNC ? -1 command
-    writer.write(
-        await encode(DataType.ARRAY, [
+        ]),await encode(DataType.ARRAY, [
             await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
             await encode(DataType.BULK_STRING, '?'.encode()),
             await encode(DataType.BULK_STRING, '-1'.encode())
-        ]))
+        ])]
+    handshake_byte = 0
+    # sends PING command    
+    writer.write(handshake_bytes[handshake_byte])
     await writer.drain()
-    response = await reader.readuntil(Constant.TERMINATOR)
-    print(f"Received handshake PSYNC response: {response}")
+    # This connection with master, needs to be open for the entire lifetime of the replica
+    while not reader.at_eof():
+        print(f"{replication['role']} - Keeping master connection alive, waiting on master's response.....")
+        response = await reader.readuntil(Constant.TERMINATOR)
+        print(f"{replication['role']} - Received response from master: {response}")
+        if response:
+            handshake_byte += 1
+            if handshake_byte < len(handshake_bytes):
+                writer.write(handshake_bytes[handshake_byte])
+                await writer.drain()   
+            continue
+    print(f"{replication['role']} - Closing the connection with master")
+    writer.close()
+    await writer.wait_closed()
+
+async def start_server(port):
+    server = await asyncio.start_server(connection_handler, "localhost",port)
+    print(f"{replication['role']} - Server running on {server.sockets[0].getsockname()}")
+    async with server:
+        await server.serve_forever()
 
 
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--port', type=int)
     parser.add_argument('--replicaof', nargs=2, type=str)
-    global args
     args = parser.parse_args()
     if args.replicaof:
         replication['role'] = 'slave'
-        await send_handshake_replica(args.replicaof)
-
-    server = await asyncio.start_server(connection_handler, "localhost", args.port or 6379)
-    print(f"Server running on {server.sockets[0].getsockname()}")
-    async with server:
-        await server.serve_forever()
-
+    coros = []
+    # We need to run the server and the connection with the master concurrently if the role is slave
+    server = asyncio.create_task(start_server(args.port))
+    coros.append(server)
+    if args.replicaof:
+        master_handler = asyncio.create_task(handle_connection_with_master(args.replicaof,args.port))
+        coros.append(master_handler)
+    await asyncio.gather(*coros)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        print(f"{replication['role']} Server stopped by the user")
