@@ -79,7 +79,7 @@ async def execute_resp_commands(commands: list[str] | None) -> bytes:
                 data = '\n'.join(
                     [f'{key}:{value}' for key, value in replication.items()]).encode()
                 return await encode(DataType.BULK_STRING, data)
-            case "REPLCONF":
+            case Command.REPLCONF:
                 return await encode(DataType.SIMPLE_STRING, Constant.OK)
     return await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
 
