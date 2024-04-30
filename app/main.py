@@ -99,7 +99,7 @@ async def connection_handler(
     finally:
         print(f"Closing the connection with {addr}")
         #writer.close()
-        #await writer.wait_closed()
+        await writer.wait_closed()
 
 
 async def send_handshake_replica(address):
@@ -134,15 +134,15 @@ async def send_handshake_replica(address):
     response = await reader.readuntil(Constant.TERMINATOR)
     print(f"Received handshake REPLCONF capa psync2 response: {response}")
     # sends PSYNC ? -1 command
-    # writer.write(
-    # await encode(DataType.ARRAY, [
-    #     await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
-    #     await encode(DataType.BULK_STRING, '?'.encode()),
-    #     await encode(DataType.BULK_STRING, '-1'.encode())
-    # ]))
-    # await writer.drain()
-    # response = await RESPParser.parse_resp_request(reader)
-    # print(f"Received handshake PSYNC response: {response}")
+    writer.write(
+    await encode(DataType.ARRAY, [
+        await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
+        await encode(DataType.BULK_STRING, '?'.encode()),
+        await encode(DataType.BULK_STRING, '-1'.encode())
+    ]))
+    await writer.drain()
+    response = await reader.readuntil(Constant.TERMINATOR)
+    print(f"Received handshake PSYNC response: {response}")
 
 
 async def main():
