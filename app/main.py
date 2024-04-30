@@ -5,6 +5,8 @@ import argparse
 # to store Key-Value pairs
 cache = {}
 args = None
+rdb_state = bytes.fromhex(
+    '524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2')
 # replication data
 replication = {
     'role': 'master',
@@ -60,7 +62,7 @@ async def execute_resp_commands(commands: list[str] | None) -> bytes:
             case Command.GET:
                 # Example: handling GET command
                 key = commands[1]
-                value = cache.get(key,None)
+                value = cache.get(key, None)
                 if value is None:
                     return Constant.NULL_BULK_STRING
                 return await encode(DataType.BULK_STRING, value.encode())
@@ -83,12 +85,12 @@ async def execute_resp_commands(commands: list[str] | None) -> bytes:
                 return await encode(DataType.SIMPLE_STRING, Constant.OK)
             case Command.PSYNC:
                 return await encode(
-                DataType.SIMPLE_STRING, 
-                Constant.SPACE_BYTE.join([
-                    Constant.FULLRESYNC, 
-                    replication['master_replid'].encode(), 
-                    str(replication['master_repl_offset']).encode()
-                ]))
+                    DataType.SIMPLE_STRING,
+                    Constant.SPACE_BYTE.join([
+                        Constant.FULLRESYNC,
+                        replication['master_replid'].encode(),
+                        str(replication['master_repl_offset']).encode()
+                    ]))
     return await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
 
 
@@ -102,11 +104,16 @@ async def connection_handler(
             response = await execute_resp_commands(commands)
             writer.write(response)
             await writer.drain()
+            # Sending the empty RDB file
+            if commands[0].lower() == Command.PSYNC:
+                writer.write(Constant.EMPTY_BYTE.join([DataType.BULK_STRING, str(
+                    len(rdb_state)).encode(), Constant.TERMINATOR, rdb_state]))
+                await writer.drain()
     except Exception as e:
         print(f"An error occurred for {addr}: {e}")
     finally:
         print(f"Closing the connection with {addr}")
-        #writer.close()
+        # writer.close()
         await writer.wait_closed()
 
 
@@ -143,11 +150,11 @@ async def send_handshake_replica(address):
     print(f"Received handshake REPLCONF capa psync2 response: {response}")
     # sends PSYNC ? -1 command
     writer.write(
-    await encode(DataType.ARRAY, [
-        await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
-        await encode(DataType.BULK_STRING, '?'.encode()),
-        await encode(DataType.BULK_STRING, '-1'.encode())
-    ]))
+        await encode(DataType.ARRAY, [
+            await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
+            await encode(DataType.BULK_STRING, '?'.encode()),
+            await encode(DataType.BULK_STRING, '-1'.encode())
+        ]))
     await writer.drain()
     response = await reader.readuntil(Constant.TERMINATOR)
     print(f"Received handshake PSYNC response: {response}")
