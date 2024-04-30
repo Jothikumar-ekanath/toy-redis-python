@@ -49,18 +49,18 @@ async def encode(datatype: DataType, data: bytes | list[bytes]):
 
 async def execute_resp_commands(commands: list[str] | None) -> bytes:
     if not commands:
-         return await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
-    else: # Treat all other RESP commands
+        return await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
+    else:  # Treat all other RESP commands
         cmd = commands[0].lower()
         match cmd:
             case Command.PING:
                 return await encode(DataType.SIMPLE_STRING, Constant.PONG)
             case Command.ECHO:
-                 return await encode(DataType.SIMPLE_STRING, commands[1].encode())
+                return await encode(DataType.SIMPLE_STRING, commands[1].encode())
             case Command.GET:
                 # Example: handling GET command
                 key = commands[1]
-                value = cache.get(key)
+                value = cache.get(key,None)
                 if value is None:
                     return Constant.NULL_BULK_STRING
                 return await encode(DataType.BULK_STRING, value.encode())
@@ -75,10 +75,10 @@ async def execute_resp_commands(commands: list[str] | None) -> bytes:
                     # print(f"Setting key {key} to expire in {delay_sec} seconds")
                     asyncio.create_task(delay(pop_cache(key), delay_sec))
                 return await encode(DataType.SIMPLE_STRING, Constant.OK)
-            case "INFO":
+            case Command.INFO:
                 data = '\n'.join(
                     [f'{key}:{value}' for key, value in replication.items()]).encode()
-                return await encode(DataType.BULK_STRING, data)            
+                return await encode(DataType.BULK_STRING, data)
             case "REPLCONF":
                 pass
     return await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
@@ -87,65 +87,62 @@ async def execute_resp_commands(commands: list[str] | None) -> bytes:
 async def connection_handler(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
-        addr = writer.get_extra_info("peername")
-        commands = await RESPParser.parse_resp_request(reader)
-        print(f"RESP parsed_req: {commands}")
-        response = await execute_resp_commands(commands)
-        writer.write(response)
-        await writer.drain()
+        while not reader.at_eof():
+            addr = writer.get_extra_info("peername")
+            commands = await RESPParser.parse_resp_request(reader)
+            print(f"RESP parsed_req: {commands}")
+            response = await execute_resp_commands(commands)
+            writer.write(response)
+            await writer.drain()
     except Exception as e:
         print(f"An error occurred for {addr}: {e}")
     finally:
-        writer.close()
-        # await writer.wait_closed()
-
-
+        print(f"Closing the connection with {addr}")
+        #writer.close()
+        #await writer.wait_closed()
 
 
 async def send_handshake_replica(address):
     host, port = address
     global args
     reader, writer = await asyncio.open_connection(host, port)
-    try:
-        # sends PING command
-        writer.write(b'*1\r\n$4\r\nping\r\n')
-        await writer.drain()
-        response = await RESPParser.parse_resp_request(reader)
-        print(f"Received handshake PING response: {response}")
-        # sends REPLCONF listening-port <PORT> command
-        writer.write(
+
+    # sends PING command
+    writer.write(b'*1\r\n$4\r\nping\r\n')
+    await writer.drain()
+    response = await reader.readuntil(Constant.TERMINATOR)
+    print(f"Received handshake PING response: {response}")
+    # sends REPLCONF listening-port <PORT> command
+    writer.write(
         await encode(DataType.ARRAY, [
             await encode(DataType.BULK_STRING, Command.REPLCONF.encode()),
             await encode(DataType.BULK_STRING, 'listening-port'.encode()),
             await encode(DataType.BULK_STRING, str(args.port).encode())
         ]))
-        await writer.drain()
-        response = await RESPParser.parse_resp_request(reader)
-        print(
-            f"Received handshake REPLCONF listening-port <PORT> response: {response}")
-        
-        writer.write(
+    await writer.drain()
+    response = await reader.readuntil(Constant.TERMINATOR)
+    print(
+        f"Received handshake REPLCONF listening-port <PORT> response: {response}")
+
+    writer.write(
         await encode(DataType.ARRAY, [
             await encode(DataType.BULK_STRING, Command.REPLCONF.encode()),
             await encode(DataType.BULK_STRING, 'capa'.encode()),
             await encode(DataType.BULK_STRING, 'psync2'.encode())
         ]))
-        await writer.drain()
-        response = await RESPParser.parse_resp_request(reader)
-        print(f"Received handshake REPLCONF capa psync2 response: {response}")
-        # sends PSYNC ? -1 command
-        # writer.write(
-        # await encode(DataType.ARRAY, [
-        #     await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
-        #     await encode(DataType.BULK_STRING, '?'.encode()),
-        #     await encode(DataType.BULK_STRING, '-1'.encode())
-        # ]))
-        # await writer.drain()
-        # response = await RESPParser.parse_resp_request(reader)
-        # print(f"Received handshake PSYNC response: {response}")
-
-    finally:
-        writer.close()
+    await writer.drain()
+    response = await reader.readuntil(Constant.TERMINATOR)
+    print(f"Received handshake REPLCONF capa psync2 response: {response}")
+    # sends PSYNC ? -1 command
+    # writer.write(
+    # await encode(DataType.ARRAY, [
+    #     await encode(DataType.BULK_STRING, Command.PSYNC.encode()),
+    #     await encode(DataType.BULK_STRING, '?'.encode()),
+    #     await encode(DataType.BULK_STRING, '-1'.encode())
+    # ]))
+    # await writer.drain()
+    # response = await RESPParser.parse_resp_request(reader)
+    # print(f"Received handshake PSYNC response: {response}")
 
 
 async def main():
