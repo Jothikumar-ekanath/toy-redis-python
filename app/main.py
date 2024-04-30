@@ -81,6 +81,14 @@ async def execute_resp_commands(commands: list[str] | None) -> bytes:
                 return await encode(DataType.BULK_STRING, data)
             case Command.REPLCONF:
                 return await encode(DataType.SIMPLE_STRING, Constant.OK)
+            case Command.PSYNC:
+                return await encode(
+                DataType.SIMPLE_STRING, 
+                Constant.SPACE_BYTE.join([
+                    Constant.FULLRESYNC, 
+                    replication['master_replid'].encode(), 
+                    str(replication['master_repl_offset']).encode()
+                ]))
     return await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
 
 
