@@ -110,10 +110,9 @@ async def connection_handler(
             if commands and commands[0].lower() == Command.REPLCONF and commands[1] == 'listening-port':
                 replica_connections.append((reader, writer))
                 print(f"{replication['role']} - Replica connections added for {addr}")
-            if commands:
-                response = await execute_resp_commands(commands)
-                writer.write(response)
-                await writer.drain()
+            response = await execute_resp_commands(commands)
+            writer.write(response)
+            await writer.drain()
             # Sending the empty RDB file
             if commands and commands[0].lower() == Command.PSYNC:
                 writer.write(Constant.EMPTY_BYTE.join([DataType.BULK_STRING, str(
@@ -122,18 +121,18 @@ async def connection_handler(
             # Sending the commands to the replicas
             if commands and commands[0].lower() in write_commands:
                 commands_bytes = await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, command.encode())) for command in commands])
-                for _, writer in replica_connections:
-                    writer.write(commands_bytes)
-                    await writer.drain()
+                for _, replica_w in replica_connections:
+                    replica_w.write(commands_bytes)
+                    await replica_w.drain()
                     print(f'sent {commands_bytes} to replica {
-                          writer.get_extra_info('peername')}')
+                          replica_w.get_extra_info('peername')}')
         print(f"{replication['role']} - Finished waiting for requests from client - {addr}")
     except Exception as e:
         print(f"{replication['role']} - Error occurred for client {addr}: {e}")
         print(traceback.format_exc())
     finally:
         print(f"{replication['role']} - Closing the connection for client {addr}")
-        # writer.close()
+        writer.close()
         await writer.wait_closed()
 
 
@@ -162,11 +161,13 @@ async def handle_connection_with_master(address,replica_port):
     # This connection with master, needs to be open for the entire lifetime of the replica
     while not reader.at_eof():
         print(f"{replication['role']} - Keeping master connection alive, waiting on master's response.....")
-        response = await reader.readuntil(Constant.TERMINATOR)
+        response = await reader.read(4096)
+        #response = await reader.readUntil(Constant.TERMINATOR) This does not work while reading rdb file
         print(f"{replication['role']} - Received response from master: {response}")
         if response:
             handshake_byte += 1
             if handshake_byte < len(handshake_bytes):
+                print(f"{replication['role']} - Sending the next handshake command to master {handshake_byte}")
                 writer.write(handshake_bytes[handshake_byte])
                 await writer.drain()   
             continue
@@ -190,7 +191,7 @@ async def main():
         replication['role'] = 'slave'
     coros = []
     # We need to run the server and the connection with the master concurrently if the role is slave
-    server = asyncio.create_task(start_server(args.port))
+    server = asyncio.create_task(start_server(args.port or 6379))
     coros.append(server)
     if args.replicaof:
         master_handler = asyncio.create_task(handle_connection_with_master(args.replicaof,args.port))
