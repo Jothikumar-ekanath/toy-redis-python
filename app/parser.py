@@ -30,50 +30,60 @@ class Command:
     GET = 'get'
     INFO = 'info'
     REPLCONF = 'replconf'
+    GETACK = 'getack'
     PSYNC = 'psync'
+    FULLRESYNC = 'fullresync'
+   
 
 
 class RESPParser:
 
-    async def parse_resp_request(reader: asyncio.StreamReader):
+    async def parse_resp_array_request(reader: asyncio.StreamReader):
+        original = b''
         try:
             first_byte = await reader.read(1)
+            original += first_byte
             if first_byte == Constant.EMPTY_BYTE:
-                return None
+                return original,None
             if first_byte != DataType.ARRAY:
                 print(f'Expected {DataType.ARRAY}, got {first_byte}')
-                return []
+                return original,[]
 
-            num_commands = int(await reader.readuntil(Constant.TERMINATOR))
+            num_commands = await reader.readuntil(Constant.TERMINATOR)
+            original += num_commands
+            num_commands_int = int(num_commands)
+            
             # note: even though read.readuntil() returns bytes along with the terminator,
             # int() is able to handle bytes and surrounding whitespaces.
             # note: '\r' and '\n' are counted as whitespaces.
 
-            commands = []
+            parsed = []
 
-            while len(commands) < num_commands:
+            while len(parsed) < num_commands_int:
 
                 datatype = await reader.read(1)
-
+                original += datatype
                 if datatype == DataType.BULK_STRING:
-                    length = int(await reader.readuntil(Constant.TERMINATOR))
+                    length = await reader.readuntil(Constant.TERMINATOR)
+                    original += length
+                    length = int(length)
                     data = await reader.read(length)
-
+                    original += data
                     first_byte = await reader.read(2)
+                    original += first_byte
                     # terminator not found after `length` bytes
                     if first_byte != Constant.TERMINATOR:
                         print(f'Expected {Constant.TERMINATOR}, got {first_byte}')
-                        return []
+                        return original,[]
 
-                    commands.append(data.decode())
+                    parsed.append(data.decode())
 
                 else:
                     print(f'Expected {DataType.BULK_STRING}, got {datatype}')
-                    return []
-
-            return commands
+                    return original,[]
+            return original,parsed
 
         except Exception as e:
             print(f'An error occurred: {e}')
-            return []
+            return original,[]
         
