@@ -189,7 +189,7 @@ async def handle_connection_with_master(address, replica_port):
     while not reader.at_eof():
         original,response = await RESPParser.parse_resp_array_request(reader)
         print(f"{replication['role']} - Received command from master: {response}, length: {len(original)}, original: {original}")
-        if response and response[0].lower() in write_commands:
+        if response and response[0].lower() in {Command.SET, Command.PING}:
             command_count += len(original)
             await execute_resp_commands(response,None)
         if response and response[0].lower() == Command.REPLCONF and response[1].lower() == Command.GETACK and response[2] == '*':
