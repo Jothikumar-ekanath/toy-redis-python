@@ -2,21 +2,27 @@ import asyncio
 from app.parser import RESPParser, DataType, Constant, Command
 import argparse
 import traceback
+
+# Global server state, irrespective of the number of clients or replicas connecting to server
 # to store Key-Value pairs
-cache = {}
-replica_connections = []
+# Locks to ensure thread safety
+cache_lock = asyncio.Lock()
+replica_connections_lock = asyncio.Lock()
+
+cache = {} # Mutable
+replica_connections = [] # mutable
+replica_ack_queue = asyncio.Queue()
+
+# Mutable variables, but written only at the start of the server, after that its all READ-ONLY
 write_commands = set([Command.SET])
 rdb_state = bytes.fromhex(
     '524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2')
-# replication data
 replication = {
     'role': 'master',
     'connected_slaves': 0,
     'master_replid': '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb',
     'master_repl_offset': 0
 }
-# coroutine that will start another coroutine after a delay in seconds
-
 
 async def delay(coro, seconds):
     # suspend for a time limit in seconds
@@ -24,11 +30,9 @@ async def delay(coro, seconds):
     # execute the other coroutine
     await coro
 
-
 async def pop_cache(key: str) -> None:
     print(f"Expiring key {key}")
     cache.pop(key, None)
-
 
 async def encode(datatype: DataType, data: bytes | list[bytes]):
     """
@@ -48,10 +52,11 @@ async def encode(datatype: DataType, data: bytes | list[bytes]):
             datatype +
             str(num_elements).encode(), Constant.EMPTY_BYTE.join(data)
         ])
-
+    if datatype == DataType.INTEGER:
+        return Constant.TERMINATOR.join([b':' + data, Constant.EMPTY_BYTE])
 
 async def execute_resp_commands(commands: list[str] | None,writer: asyncio.StreamWriter) -> None:
-    response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
+    response = None
     if not commands:
         response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
     else:  # Treat all other RESP commands
@@ -85,13 +90,24 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                     [f'{key}:{value}' for key, value in replication.items()]).encode()
                 response =  await encode(DataType.BULK_STRING, data)
             case Command.REPLCONF:
-                if replication['role'] == 'master' and commands[1] == 'listening-port':
-                    replica_connections.append(writer)
-                    print(f"{replication['role']} - Replica connections added")
-                    response =  await encode(DataType.SIMPLE_STRING, Constant.OK)
+                # Handshake commands from replica's
+                if replication['role'] == 'master': 
+                    if commands[1].lower() == 'listening-port':
+                        async with replica_connections_lock:
+                            replica_connections.append(writer)
+                        print(f"{replication['role']} - Replica connections added")
+                        response =  await encode(DataType.SIMPLE_STRING, Constant.OK)
+                    elif commands[1].lower() == 'capa':
+                        response =  await encode(DataType.SIMPLE_STRING, Constant.OK)
+            case Command.ACK:
+                if replica_ack_queue.qsize() > 0:
+                    await replica_ack_queue.get()
+                    replica_ack_queue.task_done()
+                    print(f"{replication['role']} - ACK received from replica, pending ACKs: {replica_ack_queue.qsize()}")  
                 else:
-                    response = await encode(DataType.SIMPLE_STRING, Constant.OK)
+                    print(f"{replication['role']} - Not expecting to receive ACK from replica - Lost ACK")
             case Command.PSYNC:
+                # Handshake commands from replica's
                 if replication['role'] == 'master':
                     await execute_resp_commands([Command.FULLRESYNC],writer)
                     # sending rdb file
@@ -105,31 +121,66 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                         replication['master_replid'].encode(),
                         str(replication['master_repl_offset']).encode()
                     ]))
-            case _: 
+            case Command.WAIT:
+                response =  None # Handled in the connection_handler
+            case _: # unrecognized command, not handled, return error
                 response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
-    if writer:
+    if writer and response is not None:
         print(f"{replication['role']} - writing response: {response} to client {writer.get_extra_info('peername')[0]}:{writer.get_extra_info('peername')[1]}")
         writer.write(response)
         await writer.drain()
 
-
+# Each client connection is handled by this function, All local variable belongs to the invividual client session
 async def connection_handler(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
         addr = writer.get_extra_info('peername')
+        last_command = None
         while reader.at_eof() is False:
             original,commands = await RESPParser.parse_resp_array_request(reader)
             print(f"{replication['role']} - command: {original}, length: {len(original)}, parsed: {commands} from client {addr[0]}:{addr[1]}")
             if commands is None:
                 break
             await execute_resp_commands(commands,writer) 
+            last_command = commands[0].lower()
+
             # Sending the commands to the replicas
             if commands[0].lower() in write_commands:
                 commands_bytes = await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, command.encode())) for command in commands])
-                for replica_w in replica_connections:
-                    replica_w.write(commands_bytes)
-                    await replica_w.drain()
-                    print(f'sent {commands_bytes} to replica {replica_w.get_extra_info('peername')}')
+                async with replica_connections_lock:
+                    # Propagate the command to all replicas
+                    for replica_w in replica_connections:
+                        replica_w.write(commands_bytes)
+                        await replica_w.drain()
+                        #await replica_ack_queue.put("1")
+                        print(f'sent {commands_bytes} to replica {replica_w.get_extra_info('peername')}')
+
+
+                # asyncio.sleep(1) # sleep for 1 second to allow the replicas to process the command,Also pass the stage. 
+                # # TODO this can't be done in production, need to handle the ACKs from replicas   
+                # # send GET ACK command to all replicas to acknowledge the command
+                # async with replica_connections_lock:
+                #     for replica_w in replica_connections:
+                #         replica_w.write(await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, command.encode())) for command in [Command.REPLCONF, Command.GETACK, '*']]))
+                #         await replica_w.drain()
+                #         await replica_ack_queue.put("1")
+                #         print(f'sent REPLCONF GETACK * to replica {replica_w.get_extra_info('peername')}')
+
+            if commands[0].lower() == Command.WAIT:
+                wait_time_in_sec = float(commands[2])/1000
+                expected_replica_ack_count = int(commands[1])
+                async with replica_connections_lock:
+                        replicas_count = len(replica_connections)
+                if last_command == Command.SET and expected_replica_ack_count > 0:
+                    if replica_ack_queue.qsize() > 0: # As long as there is some pending ACKs
+                        print(f"{replication['role']} - Waiting for replica ACK count: {expected_replica_ack_count}")
+                        await asyncio.sleep(wait_time_in_sec)
+                    acked_replicas = replicas_count - replica_ack_queue.qsize()
+                    writer.write(await encode(DataType.INTEGER, str(acked_replicas).encode()))
+                    await writer.drain()
+                else:
+                    writer.write(await encode(DataType.INTEGER, str(replicas_count).encode()))
+                    await writer.drain()
         print(f"{replication['role']} - Connection closed from client {addr[0]}:{addr[1]}")
     except asyncio.IncompleteReadError as re:
         print(f"{replication['role']} - IncompleteReadError from client {addr[0]}:{addr[1]}, {re}")
@@ -141,7 +192,6 @@ async def connection_handler(
         print(f"{replication['role']} - Closing the connection for client {addr[0]}:{addr[1]}")
         writer.close()
         await writer.wait_closed()
-
 
 async def handle_connection_with_master(address, replica_port):
     print(f"{replication['role']} - Handshake start with master {address} from replica port {replica_port}")
@@ -192,6 +242,12 @@ async def handle_connection_with_master(address, replica_port):
         if response and response[0].lower() in {Command.SET, Command.PING}:
             command_count += len(original)
             await execute_resp_commands(response,None)
+
+            # # Introducing new Command.ACK to acknowledge the set command
+            # if response[0].lower() == Command.SET:
+            #     writer.write(await encode(DataType.ARRAY, [await encode(DataType.BULK_STRING, Command.ACK.encode()),await encode(DataType.BULK_STRING, str(command_count).encode())]))
+            #     await writer.drain()
+
         if response and response[0].lower() == Command.REPLCONF and response[1].lower() == Command.GETACK and response[2] == '*':
             print(f"{replication['role']} - Received GETACK from master")
             # '*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$3\r\n154\r\n'
@@ -204,14 +260,12 @@ async def handle_connection_with_master(address, replica_port):
     writer.close()
     await writer.wait_closed()
 
-
 async def start_server(port):
     server = await asyncio.start_server(connection_handler, "localhost", port)
     print(
         f"{replication['role']} - Server running on {server.sockets[0].getsockname()}")
     async with server:
         await server.serve_forever()
-
 
 async def main():
     parser = argparse.ArgumentParser()

@@ -8,6 +8,7 @@ class DataType:
     BULK_STRING = b'$'
     SIMPLE_STRING = b'+'
     SIMPLE_ERROR = b'-'
+    INTEGER = b':'
 
 
 @dataclass
@@ -30,9 +31,11 @@ class Command:
     GET = 'get'
     INFO = 'info'
     REPLCONF = 'replconf'
+    ACK = 'ack'
     GETACK = 'getack'
     PSYNC = 'psync'
     FULLRESYNC = 'fullresync'
+    WAIT= 'wait'
    
 
 
