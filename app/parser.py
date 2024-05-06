@@ -36,6 +36,7 @@ class Command:
     PSYNC = 'psync'
     FULLRESYNC = 'fullresync'
     WAIT= 'wait'
+    CONFIG = 'config'
    
 
 

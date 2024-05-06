@@ -23,6 +23,8 @@ replication = {
     'master_replid': '8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb',
     'master_repl_offset': 0
 }
+dir = None
+dbfilename = None
 
 async def delay(coro, seconds):
     # suspend for a time limit in seconds
@@ -118,7 +120,12 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                         str(replication['master_repl_offset']).encode()
                     ]))
             case Command.WAIT:
-                response =  None # Handled in the connection_handler
+                response =  None # Handled in handle_wait coro
+            case Command.CONFIG:
+                if commands[1].lower() == 'get' and commands[2].lower() == 'dir':
+                    response = await encode(DataType.ARRAY, [await encode(DataType.BULK_STRING, "dir".encode()),await encode(DataType.BULK_STRING, dir.encode())])
+                elif commands[1].lower() == 'get' and commands[2].lower() == 'dbfilename':
+                    response = await encode(DataType.ARRAY, [await encode(DataType.BULK_STRING, "dbfilename".encode()),await encode(DataType.BULK_STRING, dbfilename.encode())])
             case _: # unrecognized command, not handled, return error
                 response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
     if writer and response is not None:
@@ -265,9 +272,16 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--port', type=int)
     parser.add_argument('--replicaof', nargs=2, type=str)
+    parser.add_argument('--dir', type=str)
+    parser.add_argument('--dbfilename', type=str)
     args = parser.parse_args()
     if args.replicaof:
         replication['role'] = 'slave'
+    global dir, dbfilename
+    if args.dir:
+        dir = args.dir
+    if args.dbfilename:
+        dbfilename = args.dbfilename
     coros = []
     # We need to run the server and the connection with the master concurrently if the role is slave
     server = asyncio.create_task(start_server(args.port or 6379))
