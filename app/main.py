@@ -99,13 +99,9 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                         response =  await encode(DataType.SIMPLE_STRING, Constant.OK)
                     elif commands[1].lower() == 'capa':
                         response =  await encode(DataType.SIMPLE_STRING, Constant.OK)
-            case Command.ACK:
-                if replica_ack_queue.qsize() > 0:
-                    await replica_ack_queue.get()
-                    replica_ack_queue.task_done()
-                    print(f"{replication['role']} - ACK received from replica, pending ACKs: {replica_ack_queue.qsize()}")  
-                else:
-                    print(f"{replication['role']} - Not expecting to receive ACK from replica - Lost ACK")
+                    elif commands[1].lower() == Command.ACK:
+                        await replica_ack_queue.put("1")
+                        print(f"{replication['role']} - ACK received from replica, Total ACKs: {replica_ack_queue.qsize()}")  
             case Command.PSYNC:
                 # Handshake commands from replica's
                 if replication['role'] == 'master':
@@ -130,57 +126,55 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
         writer.write(response)
         await writer.drain()
 
+async def handle_wait(commands: list[str],writer: asyncio.StreamWriter,previous_command: str) -> None:
+    if commands[0].lower() == Command.WAIT:
+        addr = writer.get_extra_info('peername')
+        wait_time_in_sec = float(commands[2])/1000
+        expected_replica_ack_count = int(commands[1])
+        async with replica_connections_lock:
+            replicas_count = len(replica_connections)
+        if previous_command == Command.SET and expected_replica_ack_count > 0:
+            # send GET ACK command to all replicas to acknowledge the command
+            async with replica_connections_lock:
+                for replica_w in replica_connections:
+                    replica_w.write(await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, command.encode())) for command in ["REPLCONF", "GETACK", '*']]))
+                    await replica_w.drain()
+                    print(f'sent REPLCONF GETACK * to replica {replica_w.get_extra_info('peername')}')
+                await asyncio.sleep(wait_time_in_sec)
+                replicas_count = replica_ack_queue.qsize() 
+        writer.write(await encode(DataType.INTEGER, str(replicas_count).encode()))
+        await writer.drain()
+        print(f"{replication['role']} - Sent replica count: {replicas_count} to client {addr[0]}:{addr[1]}")
+         # Clear the replica_ack_queue
+        while not replica_ack_queue.empty():
+            await replica_ack_queue.get()
+            replica_ack_queue.task_done()
+
+async def replicate_commands_to_replicas(commands: list[str]) -> None:
+    if commands[0].lower() in write_commands:
+        commands_bytes = await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, command.encode())) for command in commands])
+        async with replica_connections_lock:
+            for replica_w in replica_connections:
+                replica_w.write(commands_bytes)
+                await replica_w.drain()
+                print(f'sent {commands_bytes} to replica {replica_w.get_extra_info('peername')}')
+
 # Each client connection is handled by this function, All local variable belongs to the invividual client session
 async def connection_handler(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
         addr = writer.get_extra_info('peername')
-        last_command = None
+        previous_command = None
         while reader.at_eof() is False:
             original,commands = await RESPParser.parse_resp_array_request(reader)
             print(f"{replication['role']} - command: {original}, length: {len(original)}, parsed: {commands} from client {addr[0]}:{addr[1]}")
             if commands is None:
                 break
             await execute_resp_commands(commands,writer) 
-            last_command = commands[0].lower()
-
-            # Sending the commands to the replicas
-            if commands[0].lower() in write_commands:
-                commands_bytes = await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, command.encode())) for command in commands])
-                async with replica_connections_lock:
-                    # Propagate the command to all replicas
-                    for replica_w in replica_connections:
-                        replica_w.write(commands_bytes)
-                        await replica_w.drain()
-                        #await replica_ack_queue.put("1")
-                        print(f'sent {commands_bytes} to replica {replica_w.get_extra_info('peername')}')
-
-
-                # asyncio.sleep(1) # sleep for 1 second to allow the replicas to process the command,Also pass the stage. 
-                # # TODO this can't be done in production, need to handle the ACKs from replicas   
-                # # send GET ACK command to all replicas to acknowledge the command
-                # async with replica_connections_lock:
-                #     for replica_w in replica_connections:
-                #         replica_w.write(await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, command.encode())) for command in [Command.REPLCONF, Command.GETACK, '*']]))
-                #         await replica_w.drain()
-                #         await replica_ack_queue.put("1")
-                #         print(f'sent REPLCONF GETACK * to replica {replica_w.get_extra_info('peername')}')
-
-            if commands[0].lower() == Command.WAIT:
-                wait_time_in_sec = float(commands[2])/1000
-                expected_replica_ack_count = int(commands[1])
-                async with replica_connections_lock:
-                        replicas_count = len(replica_connections)
-                if last_command == Command.SET and expected_replica_ack_count > 0:
-                    if replica_ack_queue.qsize() > 0: # As long as there is some pending ACKs
-                        print(f"{replication['role']} - Waiting for replica ACK count: {expected_replica_ack_count}")
-                        await asyncio.sleep(wait_time_in_sec)
-                    acked_replicas = replicas_count - replica_ack_queue.qsize()
-                    writer.write(await encode(DataType.INTEGER, str(acked_replicas).encode()))
-                    await writer.drain()
-                else:
-                    writer.write(await encode(DataType.INTEGER, str(replicas_count).encode()))
-                    await writer.drain()
+            # Sending the commands to the replicas if needed
+            await replicate_commands_to_replicas(commands)
+            await handle_wait(commands,writer,previous_command)
+            previous_command = commands[0].lower()
         print(f"{replication['role']} - Connection closed from client {addr[0]}:{addr[1]}")
     except asyncio.IncompleteReadError as re:
         print(f"{replication['role']} - IncompleteReadError from client {addr[0]}:{addr[1]}, {re}")
