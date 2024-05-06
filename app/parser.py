@@ -37,6 +37,7 @@ class Command:
     FULLRESYNC = 'fullresync'
     WAIT= 'wait'
     CONFIG = 'config'
+    KEYS = 'keys'
    
 
 

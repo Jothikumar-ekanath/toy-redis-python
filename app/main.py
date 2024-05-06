@@ -2,13 +2,14 @@ import asyncio
 from app.parser import RESPParser, DataType, Constant, Command
 import argparse
 import traceback
+from app.rdb import RDBConfig, get_rdb_map
 
 # Global server state, irrespective of the number of clients or replicas connecting to server
 # to store Key-Value pairs
 # Locks to ensure thread safety
 cache_lock = asyncio.Lock()
 replica_connections_lock = asyncio.Lock()
-
+store = None
 cache = {} # Mutable
 replica_connections = [] # mutable
 replica_ack_queue = asyncio.Queue()
@@ -34,7 +35,8 @@ async def delay(coro, seconds):
 
 async def pop_cache(key: str) -> None:
     print(f"Expiring key {key}")
-    cache.pop(key, None)
+    async with cache_lock:
+        cache.pop(key, None)
 
 async def encode(datatype: DataType, data: bytes | list[bytes]):
     """
@@ -69,9 +71,12 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
             case Command.ECHO:
                 response =  await encode(DataType.SIMPLE_STRING, commands[1].encode())
             case Command.GET:
-                # Example: handling GET command
                 key = commands[1]
-                value = cache.get(key, None)
+                if store:
+                    value = store.get(key, None)
+                else:
+                    async with cache_lock:
+                        value = cache.get(key, None)
                 if value is None:
                     response =  Constant.NULL_BULK_STRING
                 else:
@@ -80,7 +85,8 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                 # Example: handling SET command
                 key = commands[1]
                 value = commands[2]
-                cache[key] = value
+                async with cache_lock:
+                    cache[key] = value
                 if len(commands) > 3 and commands[3].upper() == "PX":
                     # SET key value PX milliseconds
                     delay_sec = int(commands[4]) / 1000
@@ -126,6 +132,10 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                     response = await encode(DataType.ARRAY, [await encode(DataType.BULK_STRING, "dir".encode()),await encode(DataType.BULK_STRING, dir.encode())])
                 elif commands[1].lower() == 'get' and commands[2].lower() == 'dbfilename':
                     response = await encode(DataType.ARRAY, [await encode(DataType.BULK_STRING, "dbfilename".encode()),await encode(DataType.BULK_STRING, dbfilename.encode())])
+            case Command.KEYS:
+                keys = list(store.keys())
+                print(f"rdb file: {store}")
+                response = await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, key.encode())) for key in keys])   
             case _: # unrecognized command, not handled, return error
                 response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
     if writer and response is not None:
@@ -277,11 +287,13 @@ async def main():
     args = parser.parse_args()
     if args.replicaof:
         replication['role'] = 'slave'
-    global dir, dbfilename
+    global dir, dbfilename,store
     if args.dir:
         dir = args.dir
     if args.dbfilename:
         dbfilename = args.dbfilename
+    rdb_config = RDBConfig(dir=args.dir, dbfilename=args.dbfilename)
+    store = get_rdb_map(rdb_config)
     coros = []
     # We need to run the server and the connection with the master concurrently if the role is slave
     server = asyncio.create_task(start_server(args.port or 6379))
