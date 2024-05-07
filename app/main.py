@@ -163,16 +163,18 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                             cache[key] = []
                             if sequence == '*' and time != '0':
                                 sequence = '0'
-                                id = f'{time}-{sequence}'
+                            else:
+                                sequence = '1'
+                            id = f'{time}-{sequence}'
                             cache[key].append((id,entries))
                             response =  await encode(DataType.BULK_STRING, id.encode())
                         else:
                             t,s = cache[key][-1][0].split('-')
-                            print(f"t: {t}, s: {s}, time: {time}, sequence: {sequence}")
                             if sequence == '*' and int(t) == int(time):
                                 sequence = str(int(s)+1)
                                 id = f'{time}-{sequence}'
-                            print(f"t: {t}, s: {s}, time: {time}, sequence: {sequence}")
+                            elif sequence == '*':
+                                id = f'{time}-0'
                             if int(t) > int(time) or (int(t) == int(time) and int(s) >= int(sequence)):
                                 response =  await encode(DataType.SIMPLE_ERROR, 'ERR The ID specified in XADD is equal or smaller than the target stream top item'.encode())
                             else:
