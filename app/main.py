@@ -73,7 +73,7 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
             case Command.GET:
                 key = commands[1]
                 if store:
-                    value = store.get(key, None)
+                    value,_ = store.get(key, (None,None))
                 else:
                     async with cache_lock:
                         value = cache.get(key, None)
@@ -134,7 +134,6 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                     response = await encode(DataType.ARRAY, [await encode(DataType.BULK_STRING, "dbfilename".encode()),await encode(DataType.BULK_STRING, dbfilename.encode())])
             case Command.KEYS:
                 keys = list(store.keys())
-                print(f"rdb file: {store}")
                 response = await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, key.encode())) for key in keys])   
             case _: # unrecognized command, not handled, return error
                 response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
@@ -294,6 +293,7 @@ async def main():
         dbfilename = args.dbfilename
     rdb_config = RDBConfig(dir=args.dir, dbfilename=args.dbfilename)
     store = get_rdb_map(rdb_config)
+    print(f"rdb file: {store}")
     coros = []
     # We need to run the server and the connection with the master concurrently if the role is slave
     server = asyncio.create_task(start_server(args.port or 6379))
