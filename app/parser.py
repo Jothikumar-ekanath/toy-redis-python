@@ -38,6 +38,8 @@ class Command:
     WAIT= 'wait'
     CONFIG = 'config'
     KEYS = 'keys'
+    TYPE = 'type'
+    XADD = 'xadd'
    
 
 

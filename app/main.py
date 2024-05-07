@@ -138,6 +138,46 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
             case Command.KEYS:
                 keys = list(store.keys())
                 response = await encode(DataType.ARRAY, [(await encode(DataType.BULK_STRING, key.encode())) for key in keys])   
+            case Command.TYPE:
+                key = commands[1]
+                async with cache_lock:
+                    value = cache.get(key, None)
+                if value is None:
+                    response =   await encode(DataType.SIMPLE_STRING, "none".encode())
+                else:
+                    if isinstance(value, list):
+                        response =  await encode(DataType.SIMPLE_STRING, "stream".encode())
+                    else:
+                        response =  await encode(DataType.SIMPLE_STRING, "string".encode())
+            case Command.XADD:
+                key,id = commands[1],commands[2]
+                if id == '*':
+                    id = f'{round(datetime.now().timestamp()*1000)}-0'
+                time, sequence = id.split('-')
+                if id == '0-0':
+                    response =  await encode(DataType.SIMPLE_ERROR, 'ERR The ID specified in XADD must be greater than 0-0'.encode())
+                else:
+                    entries = commands[3:]
+                    async with cache_lock:
+                        if key not in cache:
+                            cache[key] = []
+                            if sequence == '*' and time != '0':
+                                sequence = '0'
+                                id = f'{time}-{sequence}'
+                            cache[key].append((id,entries))
+                            response =  await encode(DataType.BULK_STRING, id.encode())
+                        else:
+                            t,s = cache[key][-1][0].split('-')
+                            print(f"t: {t}, s: {s}, time: {time}, sequence: {sequence}")
+                            if sequence == '*' and int(t) == int(time):
+                                sequence = str(int(s)+1)
+                                id = f'{time}-{sequence}'
+                            print(f"t: {t}, s: {s}, time: {time}, sequence: {sequence}")
+                            if int(t) > int(time) or (int(t) == int(time) and int(s) >= int(sequence)):
+                                response =  await encode(DataType.SIMPLE_ERROR, 'ERR The ID specified in XADD is equal or smaller than the target stream top item'.encode())
+                            else:
+                                cache[key].append((id,entries))
+                                response =  await encode(DataType.BULK_STRING, id.encode())
             case _: # unrecognized command, not handled, return error
                 response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
     if writer and response is not None:
