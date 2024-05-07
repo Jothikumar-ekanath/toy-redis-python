@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from app.parser import RESPParser, DataType, Constant, Command
 import argparse
 import traceback
@@ -73,7 +74,9 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
             case Command.GET:
                 key = commands[1]
                 if store:
-                    value,_ = store.get(key, (None,None))
+                    value,expiry = store.get(key, (None,None))
+                    if expiry and expiry < datetime.now():
+                        value =  None
                 else:
                     async with cache_lock:
                         value = cache.get(key, None)
