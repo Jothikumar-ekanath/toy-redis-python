@@ -163,7 +163,7 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                             cache[key] = []
                             if sequence == '*' and time != '0':
                                 sequence = '0'
-                            else:
+                            elif sequence == '*' and time == '0' and commands[2] != '*':
                                 sequence = '1'
                             id = f'{time}-{sequence}'
                             cache[key].append((id,entries))
