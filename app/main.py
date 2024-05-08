@@ -180,6 +180,29 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                             else:
                                 cache[key].append((id,entries))
                                 response =  await encode(DataType.BULK_STRING, id.encode())
+            case Command.XRANGE:
+                key,start,end = commands[1],commands[2],commands[3]
+                async with cache_lock:
+                    if key not in cache:
+                        response =  await encode(DataType.ARRAY, [])
+                    else:
+                        # Iterate over the cache and get the entries
+                        entries = []
+                        if '-' in start and len(start) > 1:
+                            start = start.replace('-','.')
+                        if '-' in end:
+                            end = end.replace('-','.')
+                        for id,entry in cache[key]:
+                            print(f'id: {id},start: {start}, end: {end}')
+                            if start != '-' and float(id.replace('-','.')) < float(start):
+                                continue
+                            if end != '+' and float(id.replace('-','.')) > float(end):
+                                break
+                            entries.append(await encode(DataType.ARRAY,\
+                            [await encode(DataType.BULK_STRING, id.encode()),\
+                            await encode(DataType.ARRAY,[await encode(DataType.BULK_STRING,i.encode()) \
+                                                         for i in entry])]))
+                        response =  await encode(DataType.ARRAY, entries)
             case _: # unrecognized command, not handled, return error
                 response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
     if writer and response is not None:

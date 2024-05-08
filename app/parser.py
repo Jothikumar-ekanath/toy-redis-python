@@ -40,6 +40,8 @@ class Command:
     KEYS = 'keys'
     TYPE = 'type'
     XADD = 'xadd'
+    XRANGE = 'xrange'
+    XREAD = 'xread'
    
 
 
