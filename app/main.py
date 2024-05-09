@@ -203,6 +203,29 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                             await encode(DataType.ARRAY,[await encode(DataType.BULK_STRING,i.encode()) \
                                                          for i in entry])]))
                         response =  await encode(DataType.ARRAY, entries)
+            case Command.XREAD:
+                sub_comms = commands[2:]
+                pivot = len(sub_comms)//2
+                keys = sub_comms[:pivot]
+                ids = sub_comms[pivot:]
+                output = []
+                for key,id in zip(keys,ids):
+                    if '-' in id and len(id) > 1:
+                        id = id.replace('-','.')
+                    async with cache_lock:
+                        if key not in cache:
+                            output.append(await encode(DataType.ARRAY, []))
+                        else:
+                            # Iterate over the cache and get the entries
+                            entries = []
+                            for stream_id,entry in cache[key]:
+                                if float(stream_id.replace('-','.')) > float(id):
+                                    entries.append(await encode(DataType.ARRAY,\
+                                    [await encode(DataType.BULK_STRING, stream_id.encode()),\
+                                    await encode(DataType.ARRAY,[await encode(DataType.BULK_STRING,i.encode()) \
+                                                             for i in entry])]))
+                            output.append(await encode(DataType.ARRAY,[await encode(DataType.BULK_STRING,key.encode()),await encode(DataType.ARRAY, entries)]))
+                response =  await encode(DataType.ARRAY, output)
             case _: # unrecognized command, not handled, return error
                 response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
     if writer and response is not None:
