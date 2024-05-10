@@ -14,6 +14,8 @@ store = None
 cache = {} # Mutable
 replica_connections = [] # mutable
 replica_ack_queue = asyncio.Queue()
+stream_lock = asyncio.Lock()
+stream_conditionals = {}
 
 # Mutable variables, but written only at the start of the server, after that its all READ-ONLY
 write_commands = set([Command.SET])
@@ -180,6 +182,14 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                             else:
                                 cache[key].append((id,entries))
                                 response =  await encode(DataType.BULK_STRING, id.encode())
+                
+                    async with stream_lock:
+                        print(f"stream_conditionals: {stream_conditionals}")
+                        # Notify all the waiting XREAD commands for this key
+                        if key in stream_conditionals:
+                            async with stream_conditionals[key]:
+                                print(f"Notify all waiting XREAD commands for key: {key}")
+                                stream_conditionals[key].notify_all()
             case Command.XRANGE:
                 key,start,end = commands[1],commands[2],commands[3]
                 async with cache_lock:
@@ -204,34 +214,73 @@ async def execute_resp_commands(commands: list[str] | None,writer: asyncio.Strea
                                                          for i in entry])]))
                         response =  await encode(DataType.ARRAY, entries)
             case Command.XREAD:
-                sub_comms = commands[2:]
+                block_index = 2
+                if 'block' == commands[1]:
+                    block_index += 2
+                sub_comms = commands[block_index:]
                 pivot = len(sub_comms)//2
                 keys = sub_comms[:pivot]
-                ids = sub_comms[pivot:]
-                output = []
+                ids = sub_comms[pivot:]                                                  
+                output = []          
                 for key,id in zip(keys,ids):
-                    if '-' in id and len(id) > 1:
-                        id = id.replace('-','.')
-                    async with cache_lock:
-                        if key not in cache:
-                            output.append(await encode(DataType.ARRAY, []))
+                    if '$' == id:
+                        id = '0-0'
+                    last_entry_id,entries = await handle_streaming_from_cache(key,id)
+                    if len(entries) > 0:
+                        output.append(await encode(DataType.ARRAY,[await encode(DataType.BULK_STRING,key.encode()),await encode(DataType.ARRAY, entries)]))
+                    if 'block' == commands[1]:
+                        if '$' in commands[-1]:
+                             output.clear()
+                        if commands[2] == '0':
+                            # Block without timeout, Wait until a new entry is added and discard old entries
+                            condition = None
+                            async with stream_lock:
+                                condition = asyncio.Condition()
+                                stream_conditionals[key] = condition
+                            async with condition:
+                                print(f"Waiting for new entry for key: {key}")
+                                await condition.wait()
+                            output.clear()
                         else:
-                            # Iterate over the cache and get the entries
-                            entries = []
-                            for stream_id,entry in cache[key]:
-                                if float(stream_id.replace('-','.')) > float(id):
-                                    entries.append(await encode(DataType.ARRAY,\
-                                    [await encode(DataType.BULK_STRING, stream_id.encode()),\
-                                    await encode(DataType.ARRAY,[await encode(DataType.BULK_STRING,i.encode()) \
-                                                             for i in entry])]))
+                            # Block with timeout
+                            await asyncio.sleep(int(commands[2])/1000)                        
+                        if last_entry_id is None:
+                            last_entry_id = ids[-1]
+                        if '$' == id:
+                            id = last_entry_id
+                        _,entries = await handle_streaming_from_cache(key,last_entry_id)
+                        if len(entries) > 0:
                             output.append(await encode(DataType.ARRAY,[await encode(DataType.BULK_STRING,key.encode()),await encode(DataType.ARRAY, entries)]))
-                response =  await encode(DataType.ARRAY, output)
+                if output:
+                    response =  await encode(DataType.ARRAY, output)
+                else:
+                    response = Constant.NULL_BULK_STRING
             case _: # unrecognized command, not handled, return error
                 response = await encode(DataType.SIMPLE_ERROR, Constant.INVALID_COMMAND)
     if writer and response is not None:
         print(f"{replication['role']} - writing response: {response} to client {writer.get_extra_info('peername')[0]}:{writer.get_extra_info('peername')[1]}")
         writer.write(response)
         await writer.drain()
+
+
+async def handle_streaming_from_cache(key:str,id:str):
+    async with cache_lock:
+        if key not in cache:
+            return []
+        if '-' in id and len(id) > 1:
+            id = id.replace('-','.')
+        # Iterate over the cache and get the entries
+        entries = []
+        last_entry_id = None
+        for stream_id,entry in cache[key]:
+            if float(stream_id.replace('-','.')) > float(id):
+                entries.append(await encode(DataType.ARRAY,\
+                [await encode(DataType.BULK_STRING, stream_id.encode()),\
+                await encode(DataType.ARRAY,[await encode(DataType.BULK_STRING,i.encode()) \
+                                            for i in entry])]))
+        last_entry_id = stream_id
+        return (last_entry_id,entries)
+           
 
 async def handle_wait(commands: list[str],writer: asyncio.StreamWriter,previous_command: str) -> None:
     if commands[0].lower() == Command.WAIT:
